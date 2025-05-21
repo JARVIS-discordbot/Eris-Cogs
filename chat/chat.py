@@ -467,3 +467,48 @@ class Chat(BaseCog):
         # Send the logged messages for this specific channel
         for msg in self.logged_messages[channel_id]:
             await ctx.send(msg)
+
+    @commands.command()
+    async def simplifyimage(self, ctx: commands.Context):
+        """
+        Simplifies an image based on the user's prompt using an AI model.
+        Usage:
+        [p]simplifyimage <your_prompt>
+        Example:
+        [p]simplifyimage Simplify this image to a cartoon style
+        Notes:
+        - The user must attach an image or reference one in their message.
+        - The bot will notify the user if no image is provided before attempting the simplification.
+        Upon execution, the bot will generate a simplified version of the image and send it in the chat.
+        """
+        channel: discord.abc.Messageable = ctx.channel
+        message: discord.Message = ctx.message
+        if message.guild is None:
+            await ctx.send("Can only run in a text channel in a server, not a DM!")
+            return
+        attachment = None
+        attachments: list[discord.Attachment] = [m for m in message.attachments if m.width]
+        if message.reference:
+            referenced: discord.MessageReference = message.reference
+            referenced_message: discord.Message = await channel.fetch_message(referenced.message_id)
+            attachments += [m for m in referenced_message.attachments if m.width]
+        if len(attachments) > 0:
+            attachment: discord.Attachment = attachments[0]
+        else:
+            await ctx.send(f"Please provide an image to simplify!")
+            return
+
+        prompt_words = [w for i, w in enumerate(message.content.split(" ")) if i != 0]
+        user_prompt: str = " ".join(prompt_words)
+        if user_prompt:
+            prompt = f"Simplify this image. {user_prompt}"
+        else:
+            prompt = "Simplify this image."
+        thread_name = "Simplified image"
+        token = await self.get_openai_token()
+        try:
+            response = await model_querying.query_image_model(token, prompt, attachment, n_images=1, model="dall-e-3")
+        except ValueError:
+            await channel.send("Something went wrong!")
+            return
+        await discord_handling.send_response(response, message, channel, thread_name)

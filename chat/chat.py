@@ -471,7 +471,7 @@ class Chat(BaseCog):
     @commands.command()
     async def simplifyimage(self, ctx: commands.Context):
         """
-        Simplifies an image based on the user's prompt using an AI model.
+        Simplifies an image based on the user's prompt using the DALL-E 2 model.
         Usage:
         [p]simplifyimage <your_prompt>
         Example:
@@ -486,29 +486,13 @@ class Chat(BaseCog):
         if message.guild is None:
             await ctx.send("Can only run in a text channel in a server, not a DM!")
             return
-        attachment = None
-        attachments: list[discord.Attachment] = [m for m in message.attachments if m.width]
-        if message.reference:
-            referenced: discord.MessageReference = message.reference
-            referenced_message: discord.Message = await channel.fetch_message(referenced.message_id)
-            attachments += [m for m in referenced_message.attachments if m.width]
-        if len(attachments) > 0:
-            attachment: discord.Attachment = attachments[0]
-        else:
-            await ctx.send(f"Please provide an image to simplify!")
-            return
 
+        # Prepend "simplify" to the user's prompt
         prompt_words = [w for i, w in enumerate(message.content.split(" ")) if i != 0]
         user_prompt: str = " ".join(prompt_words)
         if user_prompt:
-            prompt = f"Simplify this image. {user_prompt}"
+            message.content = f"{message.content.split()[0]} simplify {user_prompt}"
         else:
-            prompt = "Simplify this image."
-        thread_name = "Simplified image"
-        token = await self.get_openai_token()
-        try:
-            response = await model_querying.query_image_model(token, prompt, attachment, n_images=1, model="dall-e-2")
-        except ValueError:
-            await channel.send("Something went wrong!")
-            return
-        await discord_handling.send_response(response, message, channel, thread_name)
+            message.content = f"{message.content.split()[0]} simplify this image"
+
+        await self._image(channel, message, model="dall-e-2")

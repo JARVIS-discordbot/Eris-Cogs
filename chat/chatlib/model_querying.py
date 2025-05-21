@@ -6,12 +6,12 @@ import asyncio
 from PIL import Image
 import base64
 import io
-from pprint import pprint, pformat
-from typing import Dict, List, Tuple, Union
+from pprint import pformat
+from typing import Dict, List
 
 import discord
-from redbot.core.utils import chat_formatting
 import openai
+from redbot.core.utils import chat_formatting
 
 
 async def query_text_model(
@@ -26,7 +26,9 @@ async def query_text_model(
         user_names = {}
     formatted_usernames = pformat(user_names)
 
-    today_string = dt.datetime.now().strftime("The date is %A, %B %m, %Y. The time is %I:%M %p %Z")
+    today_string = dt.datetime.now().strftime(
+        "The date is %A, %B %m, %Y. The time is %I:%M %p %Z"
+    )
 
     system_prefix = [
         {
@@ -52,7 +54,9 @@ async def query_text_model(
     if contextual_prompt != "":
         system_prefix[0]["content"].append({"type": "text", "text": contextual_prompt})
     kwargs = {"model": model, "temperature": 1, "max_tokens": 2000}
-    response = await construct_async_query(system_prefix + formatted_query, token, **kwargs)
+    response = await construct_async_query(
+        system_prefix + formatted_query, token, **kwargs
+    )
     return response
 
 
@@ -64,7 +68,12 @@ async def query_image_model(
     n_images: int = 1,
     model: str | None = None,
 ) -> io.BytesIO:
-    kwargs = {"n": n_images, "model": model or "dall-e-2", "response_format": "b64_json", "size": "1024x1024"}
+    kwargs = {
+        "n": n_images,
+        "model": model or "dall-e-2",
+        "response_format": "b64_json",
+        "size": "1024x1024",
+    }
     if attachment is not None:  # then it's an edit
         buf = io.BytesIO()
         await attachment.save(buf)
@@ -102,13 +111,18 @@ async def query_image_model(
             style = "vivid"
         elif "natural" in formatted_query:
             style = "natural"
-        kwargs = {**{"model": "dall-e-3", "quality": "hd", "style": style}, **kwargs}
+        if (model is not None) and ('dall' in model):
+            kwargs = {**{"model": "dall-e-3", "quality": "hd", "style": style}, **kwargs}
+        else:
+            kwargs = {"model": model, "n": 1, "size": "auto", "moderation": "low", "output_format": "png"}
     response = await construct_async_query(formatted_query, token, **kwargs)
 
     return response
 
 
-async def construct_async_query(query: List[Dict], token: str, **kwargs) -> list[str] | io.BytesIO:
+async def construct_async_query(
+    query: List[Dict], token: str, **kwargs
+) -> list[str] | io.BytesIO:
     loop = asyncio.get_running_loop()
     time_to_sleep = 1
     exception_string = None
@@ -133,12 +147,16 @@ async def construct_async_query(query: List[Dict], token: str, **kwargs) -> list
     return response
 
 
-def openai_client_and_query(token: str, messages: str | list[dict], **kwargs) -> str | io.BytesIO | list[io.BytesIO]:
+def openai_client_and_query(
+    token: str, messages: str | list[dict], **kwargs
+) -> str | io.BytesIO | list[io.BytesIO]:
     client = openai.OpenAI(api_key=token)
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
-    if kwargs["model"].startswith("dall"):
+    if ('dall' in kwargs['model']) or ('image' in kwargs['model']):
         if "image" in kwargs:
-            images = client.images.edit(prompt="Expand the image to fill the empty space.", **kwargs)
+            images = client.images.edit(
+                prompt="Expand the image to fill the empty space.", **kwargs
+            )
         else:
             images = client.images.generate(prompt=messages, **kwargs)
         results = []
@@ -182,3 +200,30 @@ def pagify_chat_result(response: str) -> list[str]:
             lines += chat_formatting.pagify(line)
 
     return lines
+
+
+async def generate_url_summary(
+    url_name: str, url_markdown: str, model: openai.Client, token: str
+) -> str:
+    summary = "\n".join(
+        await query_text_model(
+            token,
+            (
+                "Your job is to summarize downloaded html web-pages that have been transformed to markdown. "
+                "You will be used in an automated agent-pattern without human supervision, summarize the following in at most 3 sentences."
+            ),
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"---\nFETCHED URL NAME: {url_name}\nCONTENTS:\n{url_markdown}\n---\n",
+                        }
+                    ],
+                }
+            ],
+            model=model,
+        )
+    )
+    return summary

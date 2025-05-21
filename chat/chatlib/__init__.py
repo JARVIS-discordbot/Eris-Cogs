@@ -1,1 +1,3 @@
-from . import discord_handling, model_querying
+from .cog import Chat
+
+__all__ = ["Chat"]

@@ -4,13 +4,12 @@ import re
 import datetime as dt
 import json
 import io
-from typing import Dict, List, Tuple, Union
+from typing import List, Tuple
 import string
-import aiohttp
-
-from markdownify import markdownify as md
 
 import discord
+
+from .url_content import URLContent
 
 
 async def extract_chat_history_and_format(
@@ -45,14 +44,21 @@ async def extract_chat_history_and_format(
                 channel, author, skip_command_word=None, after=after
             )
         else:
-            extracted_message, pages = await extract_message(formatted_query, False, skip_command_word)
+            extracted_message, pages = await extract_message(
+                formatted_query,
+                False,
+                skip_command_word,
+            )
             formatted_query = [
                 {
                     "role": "user",
                     "name": clean_username(author.name),
                     "content": [
                         {"type": "text", "text": extracted_message},
-                        *[await format_attachment(attachment) for attachment in message.attachments],
+                        *[
+                            await format_attachment(attachment)
+                            for attachment in message.attachments
+                        ],
                     ],
                 }
             ] + pages
@@ -90,10 +96,18 @@ async def extract_history(
     keep_all_words = skip_command_word is None
     history = []
     users_involved = []
-    async for thread_message in channel_or_thread.history(limit=limit, oldest_first=False, after=after):
-        if thread_message.author.bot or keep_all_words or thread_message.clean_content.startswith(skip_command_word):
+    async for thread_message in channel_or_thread.history(
+        limit=limit, oldest_first=False, after=after
+    ):
+        if (
+            thread_message.author.bot
+            or keep_all_words
+            or thread_message.clean_content.startswith(skip_command_word)
+        ):
             cleaned_message, pages = await extract_message(
-                thread_message.clean_content, keep_all_words, skip_command_word
+                thread_message.clean_content,
+                keep_all_words,
+                skip_command_word,
             )
             history += pages
             history.append(
@@ -102,7 +116,10 @@ async def extract_history(
                     "name": clean_username(thread_message.author.name),
                     "content": [
                         {"type": "text", "text": cleaned_message},
-                        *[{"type": "text", "text": json.dumps(embed.to_dict())} for embed in thread_message.embeds],
+                        *[
+                            {"type": "text", "text": json.dumps(embed.to_dict())}
+                            for embed in thread_message.embeds
+                        ],
                     ],
                 },
             )
@@ -111,7 +128,10 @@ async def extract_history(
                     "role": "user",
                     "name": clean_username(thread_message.author.name),
                     "content": [
-                        *[await format_attachment(attachment) for attachment in thread_message.attachments],
+                        *[
+                            await format_attachment(attachment)
+                            for attachment in thread_message.attachments
+                        ],
                     ],
                 }
             )
@@ -122,7 +142,9 @@ async def extract_history(
         starter_message = channel_or_thread.starter_message
         if starter_message is not None:
             cleaned_message, pages = await extract_message(
-                starter_message.clean_content, keep_all_words, skip_command_word
+                starter_message.clean_content,
+                keep_all_words,
+                skip_command_word,
             )
             history += pages
             history.append(
@@ -131,7 +153,10 @@ async def extract_history(
                     "name": clean_username(author.name),
                     "content": [
                         {"type": "text", "text": cleaned_message},
-                        *[await format_attachment(attachment) for attachment in starter_message.attachments],
+                        *[
+                            await format_attachment(attachment)
+                            for attachment in starter_message.attachments
+                        ],
                     ],
                 }
             )
@@ -142,36 +167,32 @@ async def extract_history(
     return history, users_involved
 
 
-async def fetch_url(url: str):
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            if resp.status != 200:
-                return ""
-            page_content = await resp.text()
-            markdown_content = md(page_content)
-    return markdown_content
+async def fetch_url(url: str) -> URLContent:
+    url_content = URLContent(url)
+    await url_content.fetch()
+    return url_content
 
 
-async def extract_message(message, keep_all_words, skip_command_word):
+async def extract_message(message: str, keep_all_words: bool, skip_command_word: str):
     words = message.split(" ")
     keep_words = []
-    page_contents = []
+    page_contents: list[URLContent] = []
     for word in words:
         match = re.match(r"\+\[(https?://.+?)\]", word, flags=re.IGNORECASE)
         if match:
             url = match.group(1)
-            page_contents.append((url, await fetch_url(url)))
+            try:
+                urlc = await fetch_url(url)
+                page_contents.append(urlc)
+            except Exception as e:
+                print(f"Error fetching {url}")
+                continue
         elif keep_all_words or (not word.startswith(skip_command_word)):
             keep_words.append(word)
 
     cleaned_message = " ".join(keep_words)
 
-    pages = [
-        {
-            "role": "user",
-            "content": [{"type": "text", "text": f"---\n{url}---\n{page}\n---\n"} for url, page in page_contents],
-        }
-    ]
+    pages = [urlc.format_for_openai() for urlc in page_contents]
 
     return cleaned_message, pages
 
@@ -181,14 +202,19 @@ async def send_response(
     message: discord.Message,
     channel_or_thread: discord.abc.Messageable,
     thread_name: str,
-):
+) -> discord.abc.Messageable:
     if isinstance(channel_or_thread, discord.TextChannel):
-        channel_or_thread: discord.Thread = await message.create_thread(name=thread_name)
+        channel_or_thread: discord.Thread = await message.create_thread(
+            name=thread_name
+        )
 
     if isinstance(response, list):
         if isinstance(response[0], io.BytesIO):  # then we have multiple images
             await channel_or_thread.send(
-                files=[discord.File(buf, filename=f"{i}.png") for i, buf in enumerate(response)]
+                files=[
+                    discord.File(buf, filename=f"{i}.png")
+                    for i, buf in enumerate(response)
+                ]
             )
         else:
             for page in response:
@@ -196,6 +222,7 @@ async def send_response(
     else:
         filename = thread_name.replace(" ", "_") + ".png"
         await channel_or_thread.send(file=discord.File(response, filename=filename))
+    return channel_or_thread
 
 
 def extract_system_messages_from_message(message: str) -> Tuple[str, List[str]]:
@@ -244,7 +271,10 @@ async def format_attachment(attachment: discord.Attachment) -> dict:
         text = buf.read().decode("utf-8")
         formatted_attachment = {"type": "text", "text": text}
     elif attachment.width and "image" in attachment.content_type:
-        formatted_attachment = {"type": "image_url", "image_url": {"url": attachment.url}}
+        formatted_attachment = {
+            "type": "image_url",
+            "image_url": {"url": attachment.url},
+        }
     if text is None:
         print(formatted_attachment)
     else:

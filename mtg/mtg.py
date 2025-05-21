@@ -5,6 +5,7 @@ import time
 import aiohttp
 import random
 import string
+import json
 
 # third party
 import discord
@@ -46,7 +47,9 @@ class MTG(BaseCog):
             return
 
         cards = []
-        async with aiohttp.ClientSession(headers={"User-Agent": "ErisMTGDiscordBot/1.0", "Accept": "*/*"}) as session:
+        async with aiohttp.ClientSession(
+            headers={"User-Agent": "ErisMTGDiscordBot/1.0", "Accept": "*/*"}
+        ) as session:
             for match in matches:
                 try:
                     cards += await query_scryfall(session, match, self.all_cards)
@@ -64,10 +67,14 @@ class MTG(BaseCog):
             return
 
         cards = []
-        async with aiohttp.ClientSession(headers={"User-Agent": "ErisMTGDiscordBot/1.0", "Accept": "*/*"}) as session:
+        async with aiohttp.ClientSession(
+            headers={"User-Agent": "ErisMTGDiscordBot/1.0", "Accept": "*/*"}
+        ) as session:
             for match in matches:
                 try:
-                    cards += await query_scryfall(session, match, self.all_cards, datatype="json")
+                    cards += await query_scryfall(
+                        session, match, self.all_cards, datatype="json"
+                    )
                 except Exception as e:
                     print(e)
 
@@ -91,6 +98,42 @@ class MTG(BaseCog):
             await channel.send(embed=card_embed)
 
     @commands.command()
+    async def decklist_to_json(self, ctx: commands.context):
+        message: discord.Message = ctx.message
+        message_contents: str = message.content
+        decklist = message_contents.splitlines()
+        cards = []
+        async with aiohttp.ClientSession(
+            headers={"User-Agent": "ErisMTGDiscordBot/1.0", "Accept": "*/*"}
+        ) as session:
+            for line in decklist:
+                if line[0] not in (string.ascii_letters + string.digits):
+                    continue
+
+                try:
+                    referenced_card = await query_scryfall(
+                        session, line, self.all_cards, datatype="json"
+                    )
+                    referenced_card = [
+                        {
+                            key: value
+                            for key, value in card_face.items()
+                            if key in ("name", "oracle_text", "mana_cost")
+                        }
+                        for card_face in referenced_card
+                    ]
+                    cards += referenced_card
+                except Exception as e:
+                    print(e)
+
+        channel: discord.TextChannel = ctx.channel
+        json_decklist = json.dumps(cards, indent=2)
+        buf = io.BytesIO()
+        buf.write(json_decklist.encode("utf-8"))
+        buf.seek(0)
+        await channel.send(files=[discord.File(buf, filename="decklist.json")])
+
+    @commands.command()
     async def send_targets(self, ctx: commands.context, *users: discord.Member):
         users: list[discord.Member] = [*users]
         random.shuffle(users)
@@ -112,7 +155,10 @@ class MTG(BaseCog):
 
 
 async def query_scryfall(
-    session: aiohttp.ClientSession, card_name: str, all_cards: list[str], datatype="image"
+    session: aiohttp.ClientSession,
+    card_name: str,
+    all_cards: list[str],
+    datatype="image",
 ) -> list[io.BytesIO] | list[dict]:
     card_exists = (
         any(card.startswith(card_name.lower()) for card in all_cards)

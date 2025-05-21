@@ -211,7 +211,7 @@ _#/|##########/\######(   /\   )######/\##########|\#_
     \)_$$$$$$$$$$$$$$$$$$$$$$$##"  $$        `$$.        `$$.                
         `"S$$$$$$$$$$$$$$$$$#"      $          `$          `$                
             `"""""""""""""'      
-    ''',
+    '''
 ]
 
 
@@ -220,11 +220,15 @@ class Dragon(BaseCog, ErisEventMixin):
         super().__init__()
         self.bot = bot_instance
 
-        self.dragon_regex: RETYPE = re.compile(r"dragon", flags=re.IGNORECASE)
+        self.dragon_regex: RETYPE = re.compile(
+            r"dragon", flags=re.IGNORECASE
+        )
         self.bot.add_listener(self.dragon, "on_message")
 
     async def dragon(self, message: discord.Message):
-        keyword_in_message: bool = bool(self.dragon_regex.search(message.clean_content))
+        keyword_in_message: bool = bool(
+            self.dragon_regex.search(message.clean_content)
+        )
         if not keyword_in_message:
             return
 
@@ -240,10 +244,10 @@ class Dragon(BaseCog, ErisEventMixin):
         if len(dragon) > chunk:
             n_splits = len(dragon) // chunk
             print(f"Dragon too big! Sending in {n_splits} chunks")
-            dragon_lines = dragon.split("\n")
+            dragon_lines = dragon.split('\n')
             chunk_size = (len(dragon_lines) // n_splits) + 1
             for i in range(n_splits):
-                cdragon = "\n".join(dragon_lines[i * chunk_size : (i + 1) * chunk_size])
+                cdragon = '\n'.join(dragon_lines[i * chunk_size:(i + 1) * chunk_size])
                 formatted_dragon = f"```\n{cdragon}\n```"
                 print(f"\t({i}) - {len(formatted_dragon)}")
                 await ctx.send(formatted_dragon)
@@ -254,6 +258,6 @@ class Dragon(BaseCog, ErisEventMixin):
         await self.log_last_message(ctx, message)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     for dragon in dragonart:
         print(dragon)

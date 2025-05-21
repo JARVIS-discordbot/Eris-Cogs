@@ -27,9 +27,7 @@ class Say(BaseCog):
             return
 
         try:
-            guild: discord.Guild = guilds.get(
-                process.extractOne(guildname, list(guilds.keys()), score_cutoff=0.5)[0]
-            )
+            guild: discord.Guild = guilds.get(process.extractOne(guildname, list(guilds.keys()), score_cutoff=0.5)[0])
         except:
             await ctx.send("Couldn't find guild!")
             return

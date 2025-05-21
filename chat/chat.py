@@ -495,4 +495,5 @@ class Chat(BaseCog):
         else:
             message.content = f"{message.content.split()[0]} simplify this image"
 
-        await self._image(channel, message, model="dall-e-2")
+        async with channel.typing():
+            await self._image(channel, message, model="dall-e-2")

@@ -507,7 +507,7 @@ class Chat(BaseCog):
         thread_name = "Simplified image"
         token = await self.get_openai_token()
         try:
-            response = await model_querying.query_image_model(token, prompt, attachment, n_images=1, model="dall-e-3")
+            response = await model_querying.query_image_model(token, prompt, attachment, n_images=1, model="dall-e-2")
         except ValueError:
             await channel.send("Something went wrong!")
             return

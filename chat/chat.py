@@ -3,11 +3,40 @@ from __future__ import annotations
 import discord
 from redbot.core import commands, data_manager, bot, Config, checks
 from redbot.core.bot import Red
+import datetime as dt
+from typing import Dict, List, Optional, Union
+import json
 
 from .chatlib import discord_handling, model_querying
 
 BaseCog = getattr(commands, "Cog", object)
 
+class LoggedMessage:
+    def __init__(self, content: str, author_id: int, author_name: str, timestamp: dt.datetime, channel_id: int):
+        self.content = content
+        self.author_id = author_id
+        self.author_name = author_name
+        self.timestamp = timestamp
+        self.channel_id = channel_id
+
+    def to_dict(self) -> dict:
+        return {
+            "content": self.content,
+            "author_id": self.author_id,
+            "author_name": self.author_name,
+            "timestamp": self.timestamp.isoformat(),
+            "channel_id": self.channel_id
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'LoggedMessage':
+        return cls(
+            content=data["content"],
+            author_id=data["author_id"],
+            author_name=data["author_name"],
+            timestamp=dt.datetime.fromisoformat(data["timestamp"]),
+            channel_id=data["channel_id"]
+        )
 
 class Chat(BaseCog):
     def __init__(self, bot_instance: bot):
@@ -42,12 +71,78 @@ class Chat(BaseCog):
                 "directed at you are answered completely regardless of content.\n"
             ),
             "model": "gpt-4o",
+            "max_logged_messages": 100,  # Maximum number of messages to keep per channel
+            "message_expiry_days": 30,   # Number of days to keep messages before auto-deletion
         }
         self.config.register_guild(**default_guild)
         self.data_dir = data_manager.bundled_data_path(self)
         self.whois_dictionary = None
         self.bot.add_listener(self.contextual_chat_handler, "on_message")
-        self.logged_messages = {}  # Initialize a dictionary to store messages per channel
+        self.logged_messages: Dict[int, List[LoggedMessage]] = {}  # channel_id -> List[LoggedMessage]
+        self._load_logged_messages()
+
+    def _load_logged_messages(self):
+        """Load logged messages from persistent storage."""
+        try:
+            log_file = self.data_dir / "message_logs.json"
+            if log_file.exists():
+                with open(log_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    for channel_id, messages in data.items():
+                        self.logged_messages[int(channel_id)] = [
+                            LoggedMessage.from_dict(msg) for msg in messages
+                        ]
+        except Exception as e:
+            print(f"Error loading message logs: {e}")
+
+    def _save_logged_messages(self):
+        """Save logged messages to persistent storage."""
+        try:
+            log_file = self.data_dir / "message_logs.json"
+            data = {
+                str(channel_id): [msg.to_dict() for msg in messages]
+                for channel_id, messages in self.logged_messages.items()
+            }
+            with open(log_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Error saving message logs: {e}")
+
+    async def _cleanup_old_messages(self, guild: discord.Guild):
+        """Remove messages older than the configured expiry time."""
+        expiry_days = await self.config.guild(guild).message_expiry_days()
+        expiry_time = dt.datetime.now() - dt.timedelta(days=expiry_days)
+        
+        for channel_id in list(self.logged_messages.keys()):
+            channel = self.bot.get_channel(channel_id)
+            if channel and channel.guild == guild:
+                self.logged_messages[channel_id] = [
+                    msg for msg in self.logged_messages[channel_id]
+                    if msg.timestamp > expiry_time
+                ]
+                if not self.logged_messages[channel_id]:
+                    del self.logged_messages[channel_id]
+
+    async def _log_message(self, message: discord.Message):
+        """Log a message with metadata."""
+        channel_id = message.channel.id
+        if channel_id not in self.logged_messages:
+            self.logged_messages[channel_id] = []
+
+        logged_msg = LoggedMessage(
+            content=message.content,
+            author_id=message.author.id,
+            author_name=str(message.author),
+            timestamp=message.created_at,
+            channel_id=channel_id
+        )
+
+        max_messages = await self.config.guild(message.guild).max_logged_messages()
+        if len(self.logged_messages[channel_id]) >= max_messages:
+            self.logged_messages[channel_id].pop(0)
+        
+        self.logged_messages[channel_id].append(logged_msg)
+        self._save_logged_messages()
 
     @commands.command()
     @checks.mod()
@@ -186,13 +281,7 @@ class Chat(BaseCog):
             await channel.send(page)
 
         # Log the message content to the logged_messages dictionary for the specific channel
-        channel_id = message.channel.id
-        if channel_id not in self.logged_messages:
-            self.logged_messages[channel_id] = []  # Initialize the list for this channel
-
-        if len(self.logged_messages[channel_id]) >= 20:  # Keep only the last 20 messages
-            self.logged_messages[channel_id].pop(0)  # Remove the oldest message
-        self.logged_messages[channel_id].append(message.content)  # Add the new message
+        await self._log_message(message)
 
     async def get_openai_token(self):
         self.openai_settings = await self.bot.get_shared_api_tokens("openai")
@@ -449,24 +538,100 @@ class Chat(BaseCog):
         await discord_handling.send_response(response, message, channel, thread_name)
 
     @commands.command()
-    @checks.mod() # add check for mods
-    async def lastmessages(self, ctx: commands.Context):
+    @checks.mod()
+    async def lastmessages(self, ctx: commands.Context, limit: Optional[int] = None, author: Optional[discord.Member] = None):
         """
-        Displays the last 20 messages sent to ChatGPT from this channel.
+        Displays the logged messages from this channel.
         Usage:
-        [p]show_logged_messages
-        Example:
-        [p]show_logged_messages
-        Upon execution, the bot will send the logged messages in the chat.
+        [p]lastmessages [limit] [@author]
+        Examples:
+        [p]lastmessages - Shows all logged messages
+        [p]lastmessages 10 - Shows last 10 messages
+        [p]lastmessages @user - Shows messages from specific user
+        [p]lastmessages 5 @user - Shows last 5 messages from specific user
         """
         channel_id = ctx.channel.id
         if channel_id not in self.logged_messages or not self.logged_messages[channel_id]:
             await ctx.send("No messages logged yet.")
             return
 
-        # Send the logged messages for this specific channel
-        for msg in self.logged_messages[channel_id]:
-            await ctx.send(msg)
+        messages = self.logged_messages[channel_id]
+        
+        # Filter by author if specified
+        if author:
+            messages = [msg for msg in messages if msg.author_id == author.id]
+            if not messages:
+                await ctx.send(f"No messages found from {author.display_name}.")
+                return
+
+        # Apply limit if specified
+        if limit:
+            messages = messages[-limit:]
+
+        # Format and send messages
+        for msg in messages:
+            embed = discord.Embed(
+                description=msg.content,
+                timestamp=msg.timestamp,
+                color=discord.Color.blue()
+            )
+            embed.set_author(name=msg.author_name)
+            await ctx.send(embed=embed)
+
+    @commands.command()
+    @checks.mod()
+    async def exportmessages(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
+        """
+        Exports logged messages to a JSON file.
+        Usage:
+        [p]exportmessages [channel]
+        Examples:
+        [p]exportmessages - Exports messages from current channel
+        [p]exportmessages #channel - Exports messages from specified channel
+        """
+        target_channel = channel or ctx.channel
+        channel_id = target_channel.id
+        
+        if channel_id not in self.logged_messages or not self.logged_messages[channel_id]:
+            await ctx.send(f"No messages logged for {target_channel.mention}.")
+            return
+
+        messages = [msg.to_dict() for msg in self.logged_messages[channel_id]]
+        json_data = json.dumps(messages, ensure_ascii=False, indent=2)
+        
+        # Create file with timestamp
+        timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"messages_{target_channel.name}_{timestamp}.json"
+        
+        # Send as file
+        await ctx.send(
+            f"Exported {len(messages)} messages from {target_channel.mention}",
+            file=discord.File(
+                io.StringIO(json_data),
+                filename=filename
+            )
+        )
+
+    @commands.command()
+    @checks.mod()
+    async def clearmessages(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
+        """
+        Clears logged messages for a channel.
+        Usage:
+        [p]clearmessages [channel]
+        Examples:
+        [p]clearmessages - Clears messages from current channel
+        [p]clearmessages #channel - Clears messages from specified channel
+        """
+        target_channel = channel or ctx.channel
+        channel_id = target_channel.id
+        
+        if channel_id in self.logged_messages:
+            del self.logged_messages[channel_id]
+            self._save_logged_messages()
+            await ctx.send(f"Cleared logged messages for {target_channel.mention}.")
+        else:
+            await ctx.send(f"No messages logged for {target_channel.mention}.")
 
     @commands.command()
     async def simplifyimage(self, ctx: commands.Context):

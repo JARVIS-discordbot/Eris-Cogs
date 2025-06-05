@@ -21,7 +21,8 @@ async def query_text_model(
     model: str = "gpt-4o",
     contextual_prompt: str = "",
     user_names=None,
-) -> str:
+    endpoint: str = "https://api.openai.com/v1/",
+) -> list[str] | io.BytesIO:
     if user_names is None:
         user_names = {}
     formatted_usernames = pformat(user_names)
@@ -52,7 +53,12 @@ async def query_text_model(
     if contextual_prompt != "":
         system_prefix[0]["content"].append({"type": "text", "text": contextual_prompt})
     kwargs = {"model": model, "temperature": 1, "max_tokens": 2000}
-    response = await construct_async_query(system_prefix + formatted_query, token, **kwargs)
+    response = await construct_async_query(
+        system_prefix + formatted_query,
+        token,
+        endpoint,
+        **kwargs,
+    )
     return response
 
 
@@ -63,6 +69,7 @@ async def query_image_model(
     image_expansion: bool = False,
     n_images: int = 1,
     model: str | None = None,
+    endpoint: str = "https://api.openai.com/v1/",
 ) -> io.BytesIO:
     if not token:
         raise ValueError("OpenAI API token is not set. Please set it using [p]set api openai key <your_token>")
@@ -105,10 +112,22 @@ async def query_image_model(
             style = "vivid"
         elif "natural" in formatted_query:
             style = "natural"
-        kwargs = {**{"model": "dall-e-3", "quality": "hd", "style": style}, **kwargs}
+        if (model is not None) and ("dall" in model):
+            kwargs = {
+                **{"model": "dall-e-3", "quality": "hd", "style": style},
+                **kwargs,
+            }
+        else:
+            kwargs = {
+                "model": model,
+                "n": 1,
+                "size": "auto",
+                "moderation": "low",
+                "output_format": "png",
+            }
 
     try:
-        response = await construct_async_query(formatted_query, token, **kwargs)
+        response = await construct_async_query(formatted_query, token, endpoint, **kwargs)
         return response
     except Exception as e:
         if "image_generation_user_error" in str(e):
@@ -119,7 +138,9 @@ async def query_image_model(
             raise ValueError(f"Error generating image: {str(e)}")
 
 
-async def construct_async_query(query: List[Dict], token: str, **kwargs) -> list[str] | io.BytesIO:
+async def construct_async_query(
+    query: List[Dict], token: str, endpoint: str, **kwargs,
+) -> list[str] | io.BytesIO:
     loop = asyncio.get_running_loop()
     time_to_sleep = 1
     exception_string = None
@@ -129,7 +150,8 @@ async def construct_async_query(query: List[Dict], token: str, **kwargs) -> list
             raise TimeoutError(exception_string)
         try:
             response: str | io.BytesIO = await loop.run_in_executor(
-                None, lambda: openai_client_and_query(token, query, **kwargs)
+                None,
+                lambda: openai_client_and_query(token, query, endpoint, **kwargs),
             )
             break
         except Exception as e:
@@ -144,10 +166,15 @@ async def construct_async_query(query: List[Dict], token: str, **kwargs) -> list
     return response
 
 
-def openai_client_and_query(token: str, messages: str | list[dict], **kwargs) -> str | io.BytesIO | list[io.BytesIO]:
-    client = openai.OpenAI(api_key=token)
+def openai_client_and_query(
+    token: str,
+    messages: str | list[dict],
+    endpoint: str,
+    **kwargs,
+) -> str | io.BytesIO | list[io.BytesIO]:
+    client = openai.OpenAI(api_key=token, base_url=endpoint)
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
-    if kwargs["model"].startswith("dall"):
+    if ("dall" in kwargs["model"]) or ("image" in kwargs["model"]):
         if "image" in kwargs:
             images = client.images.edit(prompt="Expand the image to fill the empty space.", **kwargs)
         else:

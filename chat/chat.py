@@ -6,6 +6,7 @@ from redbot.core.bot import Red
 import datetime as dt
 from typing import Dict, List, Optional, Union
 import json
+import io
 
 from .chatlib import discord_handling, model_querying
 
@@ -73,76 +74,53 @@ class Chat(BaseCog):
             "model": "gpt-4o",
             "max_logged_messages": 100,  # Maximum number of messages to keep per channel
             "message_expiry_days": 30,   # Number of days to keep messages before auto-deletion
+            "channel_messages": {},      # Dictionary to store channel messages in config
         }
         self.config.register_guild(**default_guild)
         self.data_dir = data_manager.bundled_data_path(self)
         self.whois_dictionary = None
         self.bot.add_listener(self.contextual_chat_handler, "on_message")
-        self.logged_messages: Dict[int, List[LoggedMessage]] = {}  # channel_id -> List[LoggedMessage]
-        self._load_logged_messages()
-
-    def _load_logged_messages(self):
-        """Load logged messages from persistent storage."""
-        try:
-            log_file = self.data_dir / "message_logs.json"
-            if log_file.exists():
-                with open(log_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    for channel_id, messages in data.items():
-                        self.logged_messages[int(channel_id)] = [
-                            LoggedMessage.from_dict(msg) for msg in messages
-                        ]
-        except Exception as e:
-            print(f"Error loading message logs: {e}")
-
-    def _save_logged_messages(self):
-        """Save logged messages to persistent storage."""
-        try:
-            log_file = self.data_dir / "message_logs.json"
-            data = {
-                str(channel_id): [msg.to_dict() for msg in messages]
-                for channel_id, messages in self.logged_messages.items()
-            }
-            with open(log_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"Error saving message logs: {e}")
 
     async def _cleanup_old_messages(self, guild: discord.Guild):
         """Remove messages older than the configured expiry time."""
         expiry_days = await self.config.guild(guild).message_expiry_days()
         expiry_time = dt.datetime.now() - dt.timedelta(days=expiry_days)
         
-        for channel_id in list(self.logged_messages.keys()):
-            channel = self.bot.get_channel(channel_id)
+        channel_messages = await self.config.guild(guild).channel_messages()
+        for channel_id in list(channel_messages.keys()):
+            channel = self.bot.get_channel(int(channel_id))
             if channel and channel.guild == guild:
-                self.logged_messages[channel_id] = [
-                    msg for msg in self.logged_messages[channel_id]
-                    if msg.timestamp > expiry_time
+                channel_messages[channel_id] = [
+                    msg for msg in channel_messages[channel_id]
+                    if dt.datetime.fromisoformat(msg["timestamp"]) > expiry_time
                 ]
-                if not self.logged_messages[channel_id]:
-                    del self.logged_messages[channel_id]
+                if not channel_messages[channel_id]:
+                    del channel_messages[channel_id]
+        
+        await self.config.guild(guild).channel_messages.set(channel_messages)
 
     async def _log_message(self, message: discord.Message):
         """Log a message with metadata."""
-        channel_id = message.channel.id
-        if channel_id not in self.logged_messages:
-            self.logged_messages[channel_id] = []
+        channel_id = str(message.channel.id)
+        channel_messages = await self.config.guild(message.guild).channel_messages()
+        
+        if channel_id not in channel_messages:
+            channel_messages[channel_id] = []
 
         logged_msg = LoggedMessage(
             content=message.content,
             author_id=message.author.id,
             author_name=str(message.author),
             timestamp=message.created_at,
-            channel_id=channel_id
+            channel_id=int(channel_id)
         )
 
         max_messages = await self.config.guild(message.guild).max_logged_messages()
-        if len(self.logged_messages[channel_id]) >= max_messages:
-            self.logged_messages[channel_id].pop(0)
+        if len(channel_messages[channel_id]) >= max_messages:
+            channel_messages[channel_id].pop(0)
         
-        self.logged_messages[channel_id].append(logged_msg)
-        self._save_logged_messages()
+        channel_messages[channel_id].append(logged_msg.to_dict())
+        await self.config.guild(message.guild).channel_messages.set(channel_messages)
 
     @commands.command()
     @checks.mod()
@@ -375,9 +353,9 @@ class Chat(BaseCog):
 
         prompt = (
             "You are Wrin Sivinxi.\n"
-            "Wrin is easily distracted, spacey, and ditzy with a focus on the present. She’s very literal, and adopts "
+            "Wrin is easily distracted, spacey, and ditzy with a focus on the present. She's very literal, and adopts "
             "an attitude of only valuing things in her life that add to it. If she likes you, you will know it, as "
-            "she’s very friendly and always cares deeply for friendships.\n"
+            "she's very friendly and always cares deeply for friendships.\n"
             "Wrin is easily grossed out by bugs, crawlies, blood, and violence - instead preferring to focus her "
             "energy on positive experiences.\n"
             "Wrin is a merchant in Otari, and as of 4721 AR has been proprietor of Wrin's Wonders since its founding "
@@ -550,12 +528,14 @@ class Chat(BaseCog):
         [p]lastmessages @user - Shows messages from specific user
         [p]lastmessages 5 @user - Shows last 5 messages from specific user
         """
-        channel_id = ctx.channel.id
-        if channel_id not in self.logged_messages or not self.logged_messages[channel_id]:
+        channel_id = str(ctx.channel.id)
+        channel_messages = await self.config.guild(ctx.guild).channel_messages()
+        
+        if channel_id not in channel_messages or not channel_messages[channel_id]:
             await ctx.send("No messages logged yet.")
             return
 
-        messages = self.logged_messages[channel_id]
+        messages = [LoggedMessage.from_dict(msg) for msg in channel_messages[channel_id]]
         
         # Filter by author if specified
         if author:
@@ -590,13 +570,14 @@ class Chat(BaseCog):
         [p]exportmessages #channel - Exports messages from specified channel
         """
         target_channel = channel or ctx.channel
-        channel_id = target_channel.id
+        channel_id = str(target_channel.id)
+        channel_messages = await self.config.guild(ctx.guild).channel_messages()
         
-        if channel_id not in self.logged_messages or not self.logged_messages[channel_id]:
+        if channel_id not in channel_messages or not channel_messages[channel_id]:
             await ctx.send(f"No messages logged for {target_channel.mention}.")
             return
 
-        messages = [msg.to_dict() for msg in self.logged_messages[channel_id]]
+        messages = channel_messages[channel_id]
         json_data = json.dumps(messages, ensure_ascii=False, indent=2)
         
         # Create file with timestamp
@@ -624,11 +605,12 @@ class Chat(BaseCog):
         [p]clearmessages #channel - Clears messages from specified channel
         """
         target_channel = channel or ctx.channel
-        channel_id = target_channel.id
+        channel_id = str(target_channel.id)
+        channel_messages = await self.config.guild(ctx.guild).channel_messages()
         
-        if channel_id in self.logged_messages:
-            del self.logged_messages[channel_id]
-            self._save_logged_messages()
+        if channel_id in channel_messages:
+            del channel_messages[channel_id]
+            await self.config.guild(ctx.guild).channel_messages.set(channel_messages)
             await ctx.send(f"Cleared logged messages for {target_channel.mention}.")
         else:
             await ctx.send(f"No messages logged for {target_channel.mention}.")

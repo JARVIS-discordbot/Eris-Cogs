@@ -64,6 +64,9 @@ async def query_image_model(
     n_images: int = 1,
     model: str | None = None,
 ) -> io.BytesIO:
+    if not token:
+        raise ValueError("OpenAI API token is not set. Please set it using [p]set api openai key <your_token>")
+
     kwargs = {"n": n_images, "model": model or "dall-e-2", "response_format": "b64_json", "size": "1024x1024"}
     if attachment is not None:  # then it's an edit
         buf = io.BytesIO()
@@ -103,9 +106,17 @@ async def query_image_model(
         elif "natural" in formatted_query:
             style = "natural"
         kwargs = {**{"model": "dall-e-3", "quality": "hd", "style": style}, **kwargs}
-    response = await construct_async_query(formatted_query, token, **kwargs)
 
-    return response
+    try:
+        response = await construct_async_query(formatted_query, token, **kwargs)
+        return response
+    except Exception as e:
+        if "image_generation_user_error" in str(e):
+            raise ValueError("The image generation request was rejected. Please check your prompt and try again.")
+        elif "timeout" in str(e).lower():
+            raise TimeoutError("The image generation request timed out.")
+        else:
+            raise ValueError(f"Error generating image: {str(e)}")
 
 
 async def construct_async_query(query: List[Dict], token: str, **kwargs) -> list[str] | io.BytesIO:
